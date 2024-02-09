@@ -3,6 +3,9 @@ from shapely.geometry import LineString
 from pyproj import Geod
 import pandas as pd
 import numpy as np
+import rasterio
+from rasterio.warp import reproject, Resampling
+from rasterio.features import geometry_mask
 
 def calculate_geod_length(line):
     '''
@@ -83,3 +86,56 @@ def calculate_increased_protection_costs(admin, unit_cost):
     admin['Additional_Protection_Costs_Urban'] = np.log2(admin['Additional_Protection']) * unit_cost * admin['river_length_km_urban']
 
     return admin
+
+
+def disaggregate_building_values(admin_areas, df, raster, occupancy_type):
+    '''
+    This function disaggregates building values from the GEM exposure database (https://github.com/gem/global_exposure_model)
+    at Admin1 level to gridded urban maps maps from GHSL
+    '''
+
+    # Initialize an empty array for the output raster values
+    output_values = np.zeros_like(raster.read(1), dtype=np.float32)
+
+    # Ensure relevant columns are being treated as numeric
+    df['TOTAL_REPL_COST_USD'] = pd.to_numeric(df['TOTAL_REPL_COST_USD'], errors='coerce')
+    
+    for index, admin_area in admin_areas.iterrows():
+        
+        # Filter the DataFrame for the current admin area and the specified occupancy type
+        filtered_df = df[(df['GID_1'] == admin_area['GID_1']) & (df['OCCUPANCY'] == occupancy_type)]
+        
+        # Aggregate the total value for the specified occupancy type within the admin area
+        total_value = filtered_df['TOTAL_REPL_COST_USD'].sum()
+        
+        # Proceed if there's a meaningful total value to disaggregate
+        if total_value > 0:
+            # Create a mask for the admin area
+            geom_mask = geometry_mask([admin_area.geometry], invert=True, transform=raster.transform, out_shape=raster.shape)
+            
+            # Calculate the total area of the admin area covered by buildings in the raster
+            total_area = raster.read(1)[geom_mask].sum()
+            
+            if total_area > 0:  # Prevent division by zero
+                # Disaggregate the total value across the raster, weighted by building area
+                output_values[geom_mask] += (raster.read(1)[geom_mask] / total_area) * total_value
+    
+    return output_values
+
+def write_raster(output_path, raster_template, data):
+    '''
+    Function to write raster datasets
+    '''
+    
+    with rasterio.open(
+        output_path,
+        'w',
+        driver='GTiff',
+        height=raster_template.height,
+        width=raster_template.width,
+        count=1,
+        dtype=data.dtype,
+        crs=raster_template.crs,
+        transform=raster_template.transform,
+    ) as dst:
+        dst.write(data, 1)
