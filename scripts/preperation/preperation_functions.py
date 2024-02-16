@@ -7,6 +7,18 @@ import rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.features import geometry_mask
 
+def map_flopros_to_adm(map_df, flopros, adm):
+    '''
+    This function maps the flopros map and protection values to the admin1 vector. Doing this because we will use the admin1 vector in further analysis and
+    it's borders differ slightly to the FLOPROS layer
+    '''
+    # Merging mapping dataframe with admin file (to ensure we have ID<>ID mapping info)
+    merged_df = adm.merge(map_df, how='left', left_on='GID_1', right_on='GID_1') # these are the basin IDs in Admin file
+    # We only want to bring the merged protection layer column from the FLOPROS dataset
+    new_adm = merged_df.merge(flopros[['OBJECTID', 'MerL_Riv']], how='left', left_on='OBJECTID', right_on='OBJECTID') # these are the basin IDs in FLOPROS file
+
+    return new_adm
+
 def calculate_geod_length(line):
     '''
     Function to caluclate the geodetic length of a LineString
@@ -44,11 +56,11 @@ def calculate_river_length_per_admin(admin, rivers, threshold, urbanisation, urb
     intersected_rivers['river_segment_length_m'] = intersected_rivers['geometry'].apply(calculate_geod_length)
     intersected_urban_rivers['urban_river_segment_length_m'] = intersected_urban_rivers['geometry'].apply(calculate_geod_length)
     # Groub by admin area and sum segment lengths
-    river_lengths_by_area = intersected_rivers.groupby('OBJECTID')['river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS
-    urban_river_lengths_by_area = intersected_urban_rivers.groupby('OBJECTID')['urban_river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS
+    river_lengths_by_area = intersected_rivers.groupby('OBJECTID')['river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
+    urban_river_lengths_by_area = intersected_urban_rivers.groupby('OBJECTID')['urban_river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
     # Add the total length to the admin areas DataFrame
-    admin = admin.merge(river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS
-    admin = admin.merge(urban_river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS
+    admin = admin.merge(river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS dataset
+    admin = admin.merge(urban_river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS dataset
     admin['river_length_km'] = admin['river_segment_length_m'].fillna(0) / 1000
     admin['river_length_km_urban'] = admin['urban_river_segment_length_m'].fillna(0) / 1000
     admin.drop(columns=['river_segment_length_m'], inplace=True)
@@ -139,3 +151,34 @@ def write_raster(output_path, raster_template, data):
         transform=raster_template.transform,
     ) as dst:
         dst.write(data, 1)
+
+def calculate_buidlings_for_dry_proofing(building_area, flood_2, flood_1000):
+    '''
+    function calculates which buildings are elgible for dry proofing. The criteria is buidlings within the 1000 year flood zone that are not exposed to
+    flood depths >1 m in the 2 year flood zone. Function returns building area raster array with buildings elgible for dry proofing.
+    '''
+    # isolate buidlings within the 1000-year flood zone
+    buildings_in_1000_year_flood = np.where((flood_1000 > 0) & (building_area > 0), 1, 0)
+    # exclude buidlings in 2-year flood zone with flood depth >1 m
+    buildings_for_dry_proofing = np.where((flood_2 <= 100) | (flood_2 == 0), buildings_in_1000_year_flood, 0) # NOTE: GIRI data is in cm
+
+    return buildings_for_dry_proofing
+
+def load_raster(raster_path, save_info=False):
+    '''
+    Load raster and make sure we get rid of NaNs and negatives.
+    '''
+    
+    raster = rasterio.open(raster_path)
+    raster_array = raster.read(1)
+    
+    # Clean array (remove negatives and nans)
+    raster_array[np.isnan(raster_array)] = 0
+    raster_array = np.where(raster_array > 0, raster_array, 0)
+
+    if save_info:
+        return raster_array, raster.meta
+    
+    else:
+        return raster_array
+
