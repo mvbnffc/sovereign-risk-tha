@@ -100,7 +100,7 @@ def calculate_increased_protection_costs(admin, unit_cost):
     return admin
 
 
-def disaggregate_building_values(admin_areas, df, raster, occupancy_type):
+def disaggregate_building_values(admin_areas, df, raster, occupancy_type, column_val):
     '''
     This function disaggregates building values from the GEM exposure database (https://github.com/gem/global_exposure_model)
     at Admin1 level to gridded urban maps maps from GHSL
