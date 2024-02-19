@@ -53,18 +53,18 @@ def calculate_river_length_per_admin(admin, rivers, threshold, urbanisation, urb
     intersected_rivers = gpd.overlay(filtered_rivers, admin, how='intersection')
     intersected_urban_rivers = gpd.overlay(urban_rivers, admin, how='intersection')
     # Calculate the geodetic length of each river segment 
-    intersected_rivers['river_segment_length_m'] = intersected_rivers['geometry'].apply(calculate_geod_length)
-    intersected_urban_rivers['urban_river_segment_length_m'] = intersected_urban_rivers['geometry'].apply(calculate_geod_length)
+    intersected_rivers['r_lng_m'] = intersected_rivers['geometry'].apply(calculate_geod_length)
+    intersected_urban_rivers['u_r_lng_m'] = intersected_urban_rivers['geometry'].apply(calculate_geod_length)
     # Groub by admin area and sum segment lengths
-    river_lengths_by_area = intersected_rivers.groupby('OBJECTID')['river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
-    urban_river_lengths_by_area = intersected_urban_rivers.groupby('OBJECTID')['urban_river_segment_length_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
+    river_lengths_by_area = intersected_rivers.groupby('OBJECTID')['r_lng_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
+    urban_river_lengths_by_area = intersected_urban_rivers.groupby('OBJECTID')['u_r_lng_m'].sum().reset_index() # NOTE: this column name is unique to FLOPROS dataset
     # Add the total length to the admin areas DataFrame
     admin = admin.merge(river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS dataset
     admin = admin.merge(urban_river_lengths_by_area, how='left', left_on='OBJECTID', right_on='OBJECTID') # NOTE: this column name is unique to FLOPROS dataset
-    admin['river_length_km'] = admin['river_segment_length_m'].fillna(0) / 1000
-    admin['river_length_km_urban'] = admin['urban_river_segment_length_m'].fillna(0) / 1000
-    admin.drop(columns=['river_segment_length_m'], inplace=True)
-    admin.drop(columns=['urban_river_segment_length_m'], inplace=True)
+    admin['r_lng_km'] = admin['r_lng_m'].fillna(0) / 1000
+    admin['u_r_lng_km'] = admin['u_r_lng_m'].fillna(0) / 1000
+    admin.drop(columns=['r_lng_m'], inplace=True)
+    admin.drop(columns=['u_r_lng_m'], inplace=True)
         
     return admin
 
@@ -76,11 +76,11 @@ def calculate_increased_protection(admin, protection_goal):
     protection needed.
     '''
     # Calculate additional protection needed
-    admin['Additional_Protection'] = protection_goal - admin['MerL_Riv']
+    admin['Add_Pr'] = protection_goal - admin['MerL_Riv']
     # Ensure there are no negative values
-    admin['Additional_Protection'] = admin['Additional_Protection'].clip(lower=0)
+    admin['Add_Pr'] = admin['Add_Pr'].clip(lower=0)
     # Store the new protection level
-    admin['New_Protection_Level'] = protection_goal
+    admin['New_Pr_L'] = protection_goal
 
     return admin
 
@@ -94,8 +94,8 @@ def calculate_increased_protection_costs(admin, unit_cost):
     to desired levels. Also calculates cost for only urban rivers.
     '''
     # Calculate additional costs of protection
-    admin['Additional_Protection_Costs'] = np.log2(admin['Additional_Protection']) * unit_cost * admin['river_length_km']
-    admin['Additional_Protection_Costs_Urban'] = np.log2(admin['Additional_Protection']) * unit_cost * admin['river_length_km_urban']
+    admin['Add_Pr_c'] = np.log2(admin['Add_Pr']) * unit_cost * admin['r_lng_km']
+    admin['Add_Pr_c_u'] = np.log2(admin['Add_Pr']) * unit_cost * admin['u_r_lng_km']
 
     return admin
 
@@ -182,3 +182,24 @@ def load_raster(raster_path, save_info=False):
     else:
         return raster_array
 
+def calculate_reconstruction_value_exposed(reconstruction_value_grid, flood, depth_threshold=0):
+    '''
+    function calculates the reconstruction value of buildings within the flood extent and (if specified) a flood depth threshold.
+    function retrurns an array of the flood exposed reconstruction value
+    '''
+    # Mask extent based on depth threshold
+    flood_extent = np.where(flood>depth_threshold, flood, 0)
+    # Calculate exposed reconstruction value
+    value_exposed = np.where(flood_extent>0, reconstruction_value_grid, 0)
+
+    return value_exposed
+
+
+def union_gdfs(gdf1, gdf2):
+    '''
+    Function to apply union operation on two GeoDataFrames
+    '''
+    # Make sure both GeoDataFrames have the same CRS
+    gdf2_copy = gdf2.copy().to_crs(gdf1.crs)
+    # Perform the union operation
+    return gpd.overlay(gdf1, gdf2_copy, how='union')
