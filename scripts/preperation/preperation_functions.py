@@ -134,11 +134,11 @@ def disaggregate_building_values(admin_areas, df, raster, occupancy_type, column
     
     return output_values
 
+
 def write_raster(output_path, raster_template, data):
     '''
     Function to write raster datasets
     '''
-    
     with rasterio.open(
         output_path,
         'w',

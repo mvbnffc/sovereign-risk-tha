@@ -6,7 +6,7 @@
 import pandas as pd
 import geopandas as gpd
 import rasterio
-from preperation_functions import disaggregate_building_values, write_raster
+from preperation_functions import disaggregate_building_values, write_raster #, validate_disaggregation
 
 # Set the dataset paths
 csv_file_path = r"D:\projects\sovereign-risk\Thailand\data\exposure\GEM_Exposure_Summary_Adm1.csv"
@@ -32,6 +32,7 @@ nres_raster = rasterio.open(non_residential_raster_path)
 res_values = disaggregate_building_values(admin_areas, df, res_raster, 'Res', 'TOTAL_REPL_COST_USD') # total replacement costs
 com_values = disaggregate_building_values(admin_areas, df, nres_raster, 'Com', 'TOTAL_REPL_COST_USD')
 ind_values = disaggregate_building_values(admin_areas, df, nres_raster, 'Ind', 'TOTAL_REPL_COST_USD')
+
 res_reconstruction_values = disaggregate_building_values(admin_areas, df, res_raster, 'Res', 'COST_STRUCTURAL_USD') # structural costs only
 com_reconstruction_values = disaggregate_building_values(admin_areas, df, nres_raster, 'Com', 'COST_STRUCTURAL_USD')
 ind_reconstruction_values = disaggregate_building_values(admin_areas, df, nres_raster, 'Ind', 'COST_STRUCTURAL_USD')
@@ -45,3 +46,4 @@ write_raster(res_output_path, res_raster, res_values)
 write_raster(nres_output_path, nres_raster, nres_values)
 write_raster(res_reconstruction_output_path, res_raster, res_reconstruction_values)
 write_raster(nres_reconstruction_output_path, nres_raster, nres_reconstruction_values)
+

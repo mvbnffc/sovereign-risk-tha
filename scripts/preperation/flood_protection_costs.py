@@ -1,6 +1,7 @@
 # Script calculates the cost of flood protection at the basin scale. Based on length of river and existing -> proposed protection levels.
 import os
 import geopandas as gpd
+import rasterio
 import pandas as pd
 from preperation_functions import map_flopros_to_adm, calculate_river_length_per_admin, calculate_increased_protection, calculate_increased_protection_costs
 
@@ -27,3 +28,37 @@ flopros = calculate_increased_protection(flopros_rivers, 100)
 # Calculate how much this additional protection will cost (using Boulange et al 2023 method)
 print('Calculate cost of additional protection')
 flopros = calculate_increased_protection_costs(flopros, 2399000) # $2.399 million per km unit cost from Boulange paper
+
+# Write to final file
+flopros.to_file(os.path.join(data_dir, 'flood/adaptation/flopros/final_admin_flopros.gpkg'))
+
+##### ADDITIONAL STEP FOR FUTURE RISK ANALYSIS Create a raster mask for the urban population protected by the flood infrastructure
+ref_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\maps\THA_global_pc_h100glob.tif" # use a flood map as a reference for creating the mask rasters
+out_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\adaptation\flopros\urban_mask.tif"
+filtered_urbanisation = urbanisation_data[urbanisation_data['L2'] >= 21] # Same threshold as above
+
+# Open the reference raster to use its dimensions and CRS
+with rasterio.open(ref_raster) as ref:
+    # Create an empty mask with the same dimensions as the reference raster
+    mask = rasterio.features.rasterize(
+        ((geom, 1) for geom in filtered_urbanisation.geometry),
+        out_shape=ref.shape,
+        transform=ref.transform,
+        fill=0,  # Fill value for 'background'
+        all_touched=False,  # Only if centroids touch. 
+        dtype='uint8'
+    )
+
+# Save the mask raster
+with rasterio.open(
+    out_raster,
+    'w',
+    driver='GTiff',
+    height=ref.height,
+    width=ref.width,
+    count=1,
+    dtype='uint8',
+    crs=ref.crs,
+    transform=ref.transform,
+) as dst:
+    dst.write(mask, 1)
