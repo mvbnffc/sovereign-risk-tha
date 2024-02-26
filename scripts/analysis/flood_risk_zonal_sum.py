@@ -16,8 +16,16 @@ basin_df = gpd.read_file(basin_path)
 # Initialize an empty DataFrame to store zonal statistics from all rasters
 results_df = pd.DataFrame()
 
+i = 0
 # Loop through all rasters. Calculating zonal sum for each
 for raster_info in zonal_sum_rasters_info:
+    # Print Progress
+
+    if i % 20 == 0:
+        print('Layer #', i)
+        print(raster_info)
+    i += 1
+    
     # Calculate zonal statistics for each raster
     zs = zonal_stats(basin_df, raster_info['file'], stats="sum", geojson_out=True)
     
