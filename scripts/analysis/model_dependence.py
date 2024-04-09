@@ -38,7 +38,7 @@ def model_dependence():
     uniform_marginals = calculate_uniform_marginals(basin_timeseries, gumbel_params)
 
     # Step 5: Calculate pairwise basin dependence using the inverse Clayton copula
-    clayton_copula_models, clayton_error_basins, dependence_matrix = calculate_basin_copula_pairs(uniform_marginals, plot_dependence_matrix=True)
+    clayton_copula_models, clayton_error_basins, dependence_matrix = calculate_basin_copula_pairs(uniform_marginals, plot_dependence_matrix=False)
 
     # Step 6: Follow the minimax structuring approach (described in the Timonina et al (2015) paper)
     basin_ids = list(uniform_marginals.keys()) # take the basin IDs from the uniform marginals dictionary

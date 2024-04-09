@@ -8,6 +8,7 @@ from lmoments3 import distr
 from scipy.stats import gumbel_r, kstest
 import matplotlib.pyplot as plt
 from copulas.bivariate import Clayton
+import pandas as pd
 
 
 def vectorized_damage(depth, value, heights, damage_percents):
@@ -470,3 +471,253 @@ def minimax_ordering(dependence_matrix, basin_ids):
         selected_indices.add(next_basin_index)
     
     return ordered_basins
+
+def generate_conditional_sample(v, theta, r):
+    '''
+    Generate a conditional sample using the Flipped Calyton copula.
+    Equation 12 from the Timonina et al (2015) paper
+
+    :param v: Known loss in basin i
+    :param theta: Copula parameter for dependency between basins i and j.
+    :param r: Random value from uniform distribution for sampling.
+    :retrun: Generated conditional loss in basin j.
+    '''
+    # Debug. Need to limit the size of theta to prevent overflow error
+    if theta > 30:
+        theta = 30 # need to determine what this threshold should be via trial and error.
+    
+    u = 1-(1+((1-v)**(-theta))*(((r**(-((theta)/(1+theta))))-1)))**(-(1/theta))
+
+    return u 
+
+def interpolate_damages(RPs, losses, sim_aep, protection_level=0.5):
+    '''
+    Function to interpolate damages between given an annual exceedance probability and 
+    a depth-damage curve
+    '''
+    aeps = [1/i for i in RPs]
+    # Ensure AEPs are in ascending order for np.interp
+    aeps.sort() 
+    losses = losses[::-1]
+
+    # Interpolate based off simulated AEP
+    if sim_aep >= protection_level: 
+        return 0 
+    else:
+        interpolated_value = np.interp(sim_aep, aeps, losses)
+        return interpolated_value
+    
+def get_copula_model(copula_models, basin1, basin2):
+    """
+    Attempt to retrieve a copula model for a given pair of basins.
+    Tries both possible orders of the basin IDs.
+
+    :param copula_models: Dictionary of copula models.
+    :param basin1: ID of the first basin.
+    :param basin2: ID of the second basin.
+    :return: The copula model if found, else None.
+    """
+    return copula_models.get((basin1, basin2)) or copula_models.get((basin2, basin1))
+
+def basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, urban_class, rps):
+    '''
+    Function for extracting loss curves from each basin from the risk results dataframe.
+    Extracting these loss curves at the beginning of the Monte Carlo simulation significantly reduces 
+    compuatation times. 
+    '''
+    losses = {} # initialize empty dictionary to store losses and protection level
+    basin_df = loss_df[(loss_df[basin_col]==basin_id) & (loss_df['epoch']==epoch_val) & (loss_df['adaptation_scenario']==scenario_val) & (loss_df['urban_class']==urban_class)]
+    grouped_basin_df = basin_df.groupby([basin_col, 'RP', 'Pr_L_AEP']).agg({'damages':'sum'}).reset_index()
+    # # Pull unique protection levels from the grouped dataframe
+    unique_protection_levels = grouped_basin_df['Pr_L_AEP'].unique()
+    if len(unique_protection_levels) == 0:
+        unique_protection_levels = [1]
+    for i in unique_protection_levels:
+        losses[i] = [grouped_basin_df.loc[(grouped_basin_df['RP'] == rp) & (grouped_basin_df['Pr_L_AEP']==i), 'damages'].sum() for rp in rps]
+    
+    return losses
+
+def monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_val, scenario_val, urban_class, protection_level, num_years, ordered_basins, copula_models, num_simulations=10000):
+    '''
+    Perform Monte Carlo simulations of yearly losses incorporating basin dependencies.
+
+    :param loss_df: dataframe with losses from risk analysis
+    :param rps: list of return periods to consider. 
+    :param basin_col: name of column for basins (e.g. 'HB_L6')
+    :param epoch_val: name of epoch value (e.g. 'Today')
+    :param scenario_val: name of scenario (e.g. 'Baseline')
+    :param urban_class: name of urban class to consider (e.g. 'Residential')
+    :param protection_level: what is the baseline protection level (e.g. 0.5 or 1 in 2 years)
+    :param num_years: Number of years to simulate
+    :param ordered_basins: List of basin IDs ordered by dependency
+    :param copula_models: Dictionary holding copula model for each basin pair
+    :param num_simulations: Number of simulations (default is 10,000).
+    :return: Dataframe of simulated national losses for each year.
+    '''
+
+    # To speed up the Monte-Carlo simulation we are going to pre-compute some variables
+    # precompute loss-probability curves for each basin
+    basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, urban_class, rps) for basin_id in ordered_basins}
+    # Initialize array for national losses
+    national_losses_per_year = np.zeros((num_simulations, num_years))
+    # Generate all random numbers in advance
+    random_numbers = np.random.uniform(0, 1, (num_simulations, num_years, len(ordered_basins))).astype(np.float32)
+
+    for simulation in range(num_simulations):
+        # # print progress
+        # if simulation % 50 == 0:
+        #     print('Simulation progress: %s out of %s' % (simulation, num_simulations))
+        for year in range(num_years):
+            # Initialize a list to store losses for each basin for the current year
+            yearly_losses = []
+            yearly_loss_values = []
+            for i, basin_id in enumerate(ordered_basins):
+                # print(basin_id)
+                if i == 0:
+                    # Handle first basin
+                    r = random_numbers[simulation, year, i]
+                    loss_curves = basin_loss_curves[basin_id]
+                    basin_loss = 0
+                    yearly_losses.append(r) # add current loss simulation to the list
+                    for Pr_L in loss_curves: # loop through basin protection levels
+                        if Pr_L <= r:
+                            # print(Pr_L, 'smaller than', r, 'continuing...') # if baseline protection is achieved...
+                            continue
+                        else:
+                            yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], r, protection_level))
+                            
+                else:
+                    loss_curves = basin_loss_curves[basin_id]
+                    # Handle subsequent basins with dependencies
+                    copula = get_copula_model(copula_models, ordered_basins[i-1], basin_id)
+                    if copula is not None:
+                        # Apply dependency model if theta exists
+                        r = random_numbers[simulation, year, i]
+                        previous_loss = yearly_losses[i-1]
+                        current_loss = generate_conditional_sample(previous_loss, copula.theta, r)
+                        yearly_losses.append(current_loss)
+                        # TODO: need to check below assumption. Currently, the (1-current_loss) criteria leads to stupid results.
+                        # in the below interpolation the (1-current_loss) part of the equation is critical.
+                        # because the copula is optimized to model tail dependencies (e.g. > 0.9) and our AEPs are 
+                        # essentially inverted (e.g. 0.001 is extreme) we need to invert the random number for interpolating the
+                        # losses. This changes nothing apart from ensuring tail dependency is preserved. 
+                        for Pr_L in loss_curves: # loop through basin protection levels
+                            if Pr_L <= current_loss:
+                                # print(Pr_L, 'smaller than', r, 'continuing...') # if baseline protection is achieved...
+                                continue
+                            else:
+                                yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], current_loss, protection_level))
+                    else:
+                        # Independent simulation for this basin
+                        r = random_numbers[simulation, year, i]
+                        yearly_losses.append(r)
+                        for Pr_L in loss_curves: # loop through basin protection levels
+                            if Pr_L <= r:
+                                continue
+                            else:
+                                yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], r, protection_level))
+
+            # Aggregate losses for the current year
+            national_losses_per_year[simulation, year] = sum(yearly_loss_values)
+
+    # Convert the results into a DataFrame
+    return pd.DataFrame(national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+
+def urban_monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_val, scenario_val, urban_class, protection_level, num_years, ordered_basins, copula_models, num_simulations=10000):
+    '''
+    Adjusted to account for urban protection
+    Perform Monte Carlo simulations of yearly losses incorporating basin dependencies. This function is specifically for simulating urban flood protection
+
+    :param loss_df: dataframe with losses from risk analysis
+    :param rps: list of return periods to consider. 
+    :param basin_col: name of column for basins (e.g. 'HB_L6')
+    :param epoch_val: name of epoch value (e.g. 'Today')
+    :param scenario_val: name of scenario (e.g. 'Baseline')
+    :param urban_class: name of urban class to consider (e.g. 'Residential')
+    :param protection_level: what is the baseline protection level (e.g. 0.5 or 1 in 2 years)
+    :param num_years: Number of years to simulate
+    :param ordered_basins: List of basin IDs ordered by dependency
+    :param copula_models: Dictionary holding copula model for each basin pair
+    :param num__simulations: Number of simulations (default is 10,000).
+    :return: Dataframe of simulated national losses for each year.
+    '''
+
+    # To speed up the Monte-Carlo simulation we are going to pre-compute some variables
+    # precompute loss-probability curves for each basin
+    urban_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, urban_class, rps) for basin_id in ordered_basins}
+    basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, 'Baseline', urban_class, rps) for basin_id in ordered_basins}
+    # Initialize array for national losses
+    national_losses_per_year = np.zeros((num_simulations, num_years))
+    # Generate all random numbers in advance
+    random_numbers = np.random.uniform(0, 1, (num_simulations, num_years, len(ordered_basins))).astype(np.float32)
+
+    for simulation in range(num_simulations):
+        # # print progress
+        # if simulation % 50 == 0:
+        #     print('Simulation progress: %s out of %s' % (simulation, num_simulations))
+        for year in range(num_years):
+            # Initialize a list to store losses for each basin for the current year
+            yearly_losses = []
+            yearly_loss_values = []
+            for i, basin_id in enumerate(ordered_basins):
+                if i == 0:
+                    # Handle first basin
+                    r = random_numbers[simulation, year, i]
+                    urban_loss_curves = urban_basin_loss_curves[basin_id]
+                    loss_curves = basin_loss_curves[basin_id]
+                    yearly_losses.append(r) # add current loss simulation to the list
+                    if r < 0.01: # use baseline maps if AEP < 0.01
+                        for Pr_L in loss_curves:
+                            yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], r, protection_level))
+                    else:
+                        for Pr_L in urban_loss_curves:
+                            if Pr_L <= r:
+                                continue
+                            else:
+                                yearly_loss_values.append(interpolate_damages(rps, urban_loss_curves[Pr_L], r, protection_level))
+                            
+                else:
+                    urban_loss_curves = urban_basin_loss_curves[basin_id]
+                    loss_curves = basin_loss_curves[basin_id]
+                    # Handle subsequent basins with dependencies
+                    copula = get_copula_model(copula_models, ordered_basins[i-1], basin_id)
+                    if copula is not None:
+                        # Apply dependency model if theta exists
+                        r = random_numbers[simulation, year, i]
+                        previous_loss = yearly_losses[i-1]
+                        current_loss = generate_conditional_sample(previous_loss, copula.theta, r)
+                        yearly_losses.append(current_loss)
+                        # TODO: need to check below assumption. Currently, the (1-current_loss) criteria leads to stupid results.
+                        # in the below interpolation the (1-current_loss) part of the equation is critical.
+                        # because the copula is optimized to model tail dependencies (e.g. > 0.9) and our AEPs are 
+                        # essentially inverted (e.g. 0.001 is extreme) we need to invert the random number for interpolating the
+                        # losses. This changes nothing apart from ensuring tail dependency is preserved. 
+                        if current_loss < 0.01: # Use baseline maps
+                            for Pr_L in loss_curves: 
+                                yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], current_loss, protection_level))
+                        else:
+                            for Pr_L in urban_loss_curves:
+                                if Pr_L <= current_loss:
+                                    continue
+                                else:
+                                    yearly_loss_values.append(interpolate_damages(rps, urban_loss_curves[Pr_L], current_loss, protection_level))                    
+                    else:
+                        # Independent simulation for this basin
+                        r = random_numbers[simulation, year, i]
+                        yearly_losses.append(r)
+                        if r < 0.01: # use baseline maps if AEP < 0.01
+                            for Pr_L in loss_curves:
+                                yearly_loss_values.append(interpolate_damages(rps, loss_curves[Pr_L], r, protection_level))
+                        else:
+                            for Pr_L in urban_loss_curves:
+                                if Pr_L <= r:
+                                    continue
+                                else:
+                                    yearly_loss_values.append(interpolate_damages(rps, urban_loss_curves[Pr_L], r, protection_level))
+
+            # Aggregate losses for the current year
+            national_losses_per_year[simulation, year] = sum(yearly_loss_values)
+
+    # Convert the results into a DataFrame
+    return pd.DataFrame(national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+
