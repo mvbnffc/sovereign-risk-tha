@@ -9,6 +9,9 @@ from scipy.stats import gumbel_r, kstest
 import matplotlib.pyplot as plt
 from copulas.bivariate import Clayton
 import pandas as pd
+import subprocess
+from openpyxl import load_workbook
+import datetime
 
 
 def vectorized_damage(depth, value, heights, damage_percents):
@@ -30,7 +33,7 @@ def calculate_risk(flood, building_values, heights, damage_percents):
 
     return risk
 
-def simple_risk_overlay(flood_path, exposure_path, output_path, damage_function):
+def simple_risk_overlay(flood_path, exposure_path, output_path, damage_function, depth_adjuster):
     '''
     This function performs a simple risk overlay analysis.
     It takes as input a flood map, an exposure map, and a vulnerability curve.
@@ -63,12 +66,103 @@ def simple_risk_overlay(flood_path, exposure_path, output_path, damage_function)
             flood_array = flood.read(1, window=window)
             exposure_array = exposure.read(1, window=window)
             flood_array = np.where(flood_array>0, flood_array, 0) # remove negative values
-            flood_array = flood_array/100 # convert to m
+            flood_array = flood_array/depth_adjuster # convert to m
             risk = calculate_risk(flood_array, exposure_array, damage_function[0], damage_function[1]) # depths index 0 and prp damage index 1
 
             dst.write(risk.astype(rasterio.float32), window=window, indexes=1)
 
-def flopros_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function):
+def calculate_total_raster_value(raster_path):
+    '''
+    This functions returns the total value of all non-zero raster cells in a layer.
+    '''
+    with rasterio.open(raster_path) as dst:
+        raster = dst.read(1)
+        raster_sum = np.sum(raster[raster>0])
+    
+    return raster_sum
+
+def create_relative_exposure_layer(exposure_path, total_exposure_value, output_path):
+    '''
+    This function creates a relative exposure layer. For each cell it divides the value by the total summed values for the entire layer.
+    '''
+    # Load the raster
+    exposure = rasterio.open(exposure_path)
+
+    # Data info
+    profile = exposure.meta.copy()
+    profile.update(dtype=rasterio.float32, compress='lzw', nodata=0)
+    nodata = exposure.nodata
+
+    with rasterio.open(output_path, 'w', **profile) as dst:
+        i = 0
+        for ji, window in exposure.block_windows(1):
+            i += 1
+
+            affine = rasterio.windows.transform(window, exposure.transform)
+            height, width = rasterio.windows.shape(window)
+            bbox = rasterio.windows.bounds(window, exposure.transform)
+
+            profile.update({
+                'height': height,
+                'width': width,
+                'affine': affine
+            })
+
+            exposure_array = exposure.read(1, window=window)
+            exposure_array = np.where(exposure_array>0, exposure_array/total_exposure_value, 0) # calculate proportional area rather than absolute (may have to adjust this for decimal precision)
+
+            dst.write(exposure_array.astype(rasterio.float32), window=window, indexes=1)
+
+def dignad_simple_risk_overlay(flood_path, exposure_path, output_path, damage_function, depth_adjuster, total_exposure_value):
+    '''
+    This function performs a simple risk overlay analysis. But instead of calculating the actual damage
+    it calcualtes a proportional damage (related to total area or total distance) - this allows us to tweak the exposure information later in the analysis
+    It takes as input a flood map, an exposure map, and a vulnerability curve.
+    It outputs a risk raster
+    '''
+    # Load the rasters
+    flood = rasterio.open(flood_path)
+    exposure = rasterio.open(exposure_path)
+
+    # Data info
+    profile = flood.meta.copy()
+    profile.update(dtype=rasterio.float32, compress='lzw', nodata=0)
+    nodata = flood.nodata
+
+    with rasterio.open(output_path, 'w', **profile) as dst:
+        i = 0
+        for ji, window in flood.block_windows(1):
+            i += 1
+
+            affine = rasterio.windows.transform(window, flood.transform)
+            height, width = rasterio.windows.shape(window)
+            bbox = rasterio.windows.bounds(window, flood.transform)
+
+            profile.update({
+                'height': height,
+                'width': width,
+                'affine': affine
+            })
+
+            flood_array = flood.read(1, window=window)
+            exposure_array = exposure.read(1, window=window)
+            exposure_array = np.where(exposure_array>0, exposure_array/total_exposure_value, 0) # calculate proportional area rather than absolute (may have to adjust this for decimal precision)
+            flood_array = np.where(flood_array>0, flood_array, 0) # remove negative values
+            flood_array = flood_array/depth_adjuster # convert to m
+            risk = calculate_risk(flood_array, exposure_array, damage_function[0], damage_function[1]) # depths index 0 and prp damage index 1
+
+            dst.write(risk.astype(rasterio.float32), window=window, indexes=1)
+
+def simple_risk_overlay_percentile(flood_path, exposure_path, output_path, damage_function, depth_adjuster):
+    '''
+    TODO
+    This function performs a simple risk overlay analysis, but calculates the 5th and 95th percentile of damages.
+    It takes as input a flood map, an exposure map, and a vulnerability curve (with standard deviation information).
+    It outputs two risk rasters - a 5th and 95th percentile
+    '''
+    return
+
+def flopros_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function, depth_adjuster):
     '''
     This function performs a risk overlay analysis. Before the risk analysis it masks all urban areas in the exposure dataset
     It takes as input a flood map, an exposure map, an urban area mask map, and a vulnerability curve.
@@ -104,12 +198,12 @@ def flopros_risk_overlay(flood_path, exposure_path, output_path, mask_path, dama
             mask_array = mask.read(1, window=window)
             exposure_array = np.where(mask_array==1, 0, exposure_array) # wherever the urban mask equals 1, set to zero in exposure dataset
             flood_array = np.where(flood_array>0, flood_array, 0) # remove negative values
-            flood_array = flood_array/100 # convert to m
+            flood_array = flood_array/depth_adjuster # convert to m 
             risk = calculate_risk(flood_array, exposure_array, damage_function[0], damage_function[1]) # depths index 0 and prp damage index 1
 
             dst.write(risk.astype(rasterio.float32), window=window, indexes=1)
 
-def dryproofing_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function, damage_function_dp):
+def dryproofing_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function, damage_function_dp, depth_adjuster):
     '''
     This function performs a risk overlay analysis. For masked dryproofed cells, the damage function is adjusted to return no damages for depths < 1m
     It takes as input a flood map, an exposure map, an urban area mask map, and two vulnerability curves.
@@ -146,7 +240,7 @@ def dryproofing_risk_overlay(flood_path, exposure_path, output_path, mask_path, 
             dry_proof_array = np.where(mask_array==1, exposure_array, 0) # cells for dry proofing are marked as 1
             non_dry_proof_array = np.where(mask_array==1, 0, exposure_array)
             flood_array = np.where(flood_array>0, flood_array, 0) # remove negative values
-            flood_array = flood_array/100 # convert to m
+            flood_array = flood_array/depth_adjuster # convert to m
             dry_proof_risk = calculate_risk(flood_array, dry_proof_array, damage_function_dp[0], damage_function_dp[1]) # pass new damage function for dry proof cells
             non_dry_proof_risk = calculate_risk(flood_array, non_dry_proof_array, damage_function[0], damage_function[1]) # normal damage function
             # Sum risk arrays
@@ -154,7 +248,7 @@ def dryproofing_risk_overlay(flood_path, exposure_path, output_path, mask_path, 
 
             dst.write(risk.astype(rasterio.float32), window=window, indexes=1)
 
-def relocation_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function):
+def relocation_risk_overlay(flood_path, exposure_path, output_path, mask_path, damage_function, depth_adjuster):
     '''
     This function performs a risk overlay analysis. Urban cells in the 2 year flood plain exposed to flood depths > 1 m are removed from the analysis.
     It takes as input a flood map, an exposure map, an urban cell (2yr flood > 1 m depth) map, and a vulnerability curves.
@@ -190,7 +284,7 @@ def relocation_risk_overlay(flood_path, exposure_path, output_path, mask_path, d
             mask_array = mask.read(1, window=window)
             exposure_array = np.where(mask_array>0, 0, exposure_array) # Remove cells that will be relocated
             flood_array = np.where(flood_array>0, flood_array, 0) # remove negative values
-            flood_array = flood_array/100 # convert to m
+            flood_array = flood_array/depth_adjuster # convert to m
             risk = calculate_risk(flood_array, exposure_array, damage_function[0], damage_function[1])
             
             dst.write(risk.astype(rasterio.float32), window=window, indexes=1)
@@ -507,6 +601,26 @@ def interpolate_damages(RPs, losses, sim_aep, protection_level=0.5):
         interpolated_value = np.interp(sim_aep, aeps, losses)
         return interpolated_value
     
+def d_interpolate_damages(RPs, losses, sim_aep, total_cs, proportional_cs, protection_level=0.5):
+    '''
+    Function to interpolate damages between given an annual exceedance probability and 
+    a depth-damage curve. Adjusted for DIGNAD - also takes as input the capital stock value and proportional exposure info
+    '''
+    aeps = [1/i for i in RPs]
+    # Ensure AEPs are in ascending order for np.interp
+    aeps.sort() 
+    losses = losses[::-1]
+
+    # Multiply losses by capital stock
+    losses = [i * (total_cs * proportional_cs) for i in losses]
+
+    # Interpolate based off simulated AEP
+    if sim_aep >= protection_level: 
+        return 0 
+    else:
+        interpolated_value = np.interp(sim_aep, aeps, losses)
+        return interpolated_value
+    
 def get_copula_model(copula_models, basin1, basin2):
     """
     Attempt to retrieve a copula model for a given pair of basins.
@@ -721,3 +835,229 @@ def urban_monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_val, 
     # Convert the results into a DataFrame
     return pd.DataFrame(national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
 
+def sectoral_monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_val, scenario_val, protection_level, num_years, ordered_basins, copula_models, num_simulations=10000):
+    '''
+    Perform Monte Carlo simulations of yearly losses incorporating basin dependencies.
+    Same as the monte carlo dependence simulation, except it now outputs sectoral losses.
+
+    :param loss_df: dataframe with losses from risk analysis
+    :param rps: list of return periods to consider. 
+    :param basin_col: name of column for basins (e.g. 'HB_L6')
+    :param epoch_val: name of epoch value (e.g. 'Today')
+    :param scenario_val: name of scenario (e.g. 'Baseline')
+    :param protection_level: what is the baseline protection level (e.g. 0.5 or 1 in 2 years)
+    :param num_years: Number of years to simulate
+    :param ordered_basins: List of basin IDs ordered by dependency
+    :param copula_models: Dictionary holding copula model for each basin pair
+    :param num_simulations: Number of simulations (default is 10,000).
+    :return: Dataframe of simulated national losses for each year, for each sector
+    '''
+
+    # To speed up the Monte-Carlo simulation we are going to pre-compute some variables
+    # precompute loss-probability curves for each basin for the four ectors
+    
+    res_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, "Residential", rps) for basin_id in ordered_basins}
+    com_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, "Commercial", rps) for basin_id in ordered_basins}
+    ind_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, "Industrial", rps) for basin_id in ordered_basins}
+    inf_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, "Infrastructure", rps) for basin_id in ordered_basins}
+    
+    # Initialize arrays for national losses
+    res_national_losses_per_year = np.zeros((num_simulations, num_years))
+    com_national_losses_per_year = np.zeros((num_simulations, num_years))
+    ind_national_losses_per_year = np.zeros((num_simulations, num_years))
+    inf_national_losses_per_year = np.zeros((num_simulations, num_years))
+    # Generate all random numbers in advance
+    random_numbers = np.random.uniform(0, 1, (num_simulations, num_years, len(ordered_basins))).astype(np.float32)
+
+    for simulation in range(num_simulations):
+        # # print progress
+        # if simulation % 50 == 0:
+        #     print('Simulation progress: %s out of %s' % (simulation, num_simulations))
+        for year in range(num_years):
+            # Initialize a list to store losses for each basin for the current year
+            yearly_losses = []
+            res_yearly_loss_values = []
+            com_yearly_loss_values = []
+            ind_yearly_loss_values = []
+            inf_yearly_loss_values = []
+            for i, basin_id in enumerate(ordered_basins):
+                # print(basin_id)
+                if i == 0:
+                    # Handle first basin
+                    r = random_numbers[simulation, year, i]
+                    res_loss_curves = res_basin_loss_curves[basin_id]
+                    com_loss_curves = com_basin_loss_curves[basin_id]
+                    ind_loss_curves = ind_basin_loss_curves[basin_id]
+                    inf_loss_curves = inf_basin_loss_curves[basin_id]
+                    basin_loss = 0
+                    yearly_losses.append(r) # add current loss simulation to the list
+                    for Pr_L in res_loss_curves: # loop through basin protection levels
+                        if Pr_L <= r:
+                            # print(Pr_L, 'smaller than', r, 'continuing...') # if baseline protection is achieved...
+                            continue
+                        else:
+                            res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], r, protection_level))
+                            com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], r, protection_level))
+                            ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], r, protection_level))
+                            inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], r, protection_level))
+                            
+                else:
+                    res_loss_curves = res_basin_loss_curves[basin_id]
+                    com_loss_curves = com_basin_loss_curves[basin_id]
+                    ind_loss_curves = ind_basin_loss_curves[basin_id]
+                    inf_loss_curves = inf_basin_loss_curves[basin_id]
+                    # Handle subsequent basins with dependencies
+                    copula = get_copula_model(copula_models, ordered_basins[i-1], basin_id)
+                    if copula is not None:
+                        # Apply dependency model if theta exists
+                        r = random_numbers[simulation, year, i]
+                        previous_loss = yearly_losses[i-1]
+                        current_loss = generate_conditional_sample(previous_loss, copula.theta, r)
+                        yearly_losses.append(current_loss)
+                        # TODO: need to check below assumption. Currently, the (1-current_loss) criteria leads to stupid results.
+                        # in the below interpolation the (1-current_loss) part of the equation is critical.
+                        # because the copula is optimized to model tail dependencies (e.g. > 0.9) and our AEPs are 
+                        # essentially inverted (e.g. 0.001 is extreme) we need to invert the random number for interpolating the
+                        # losses. This changes nothing apart from ensuring tail dependency is preserved. 
+                        for Pr_L in res_loss_curves: # loop through basin protection levels
+                            if Pr_L <= current_loss:
+                                # print(Pr_L, 'smaller than', r, 'continuing...') # if baseline protection is achieved...
+                                continue
+                            else:
+                                res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], current_loss, protection_level))
+                                com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], current_loss, protection_level))
+                                ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], current_loss, protection_level))
+                                inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], current_loss, protection_level))
+                    else:
+                        # Independent simulation for this basin
+                        r = random_numbers[simulation, year, i]
+                        yearly_losses.append(r)
+                        for Pr_L in res_loss_curves: # loop through basin protection levels
+                            if Pr_L <= r:
+                                continue
+                            else:
+                                res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], r, protection_level))
+                                com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], r, protection_level))
+                                ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], r, protection_level))
+                                inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], r, protection_level))
+
+            # Aggregate losses for the current year
+            res_national_losses_per_year[simulation, year] = sum(res_yearly_loss_values)
+            com_national_losses_per_year[simulation, year] = sum(com_yearly_loss_values)
+            ind_national_losses_per_year[simulation, year] = sum(ind_yearly_loss_values)
+            inf_national_losses_per_year[simulation, year] = sum(inf_yearly_loss_values)
+
+    res_df = pd.DataFrame(res_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    com_df = pd.DataFrame(com_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    ind_df = pd.DataFrame(ind_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    inf_df = pd.DataFrame(inf_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+
+    return res_df, com_df, ind_df, inf_df
+
+# Necessary functions
+def update_calibration_parameters(sheet, parameter, new_value):
+    '''
+    This function updates the calibration sheet in DIGNAD.
+    '''
+
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.value == parameter:
+                # Assuming the value needs to be updated in the cell right after the parameter
+                target_cell = sheet.cell(row=cell.row, column=cell.column + 1)
+                try:
+                    # Convert to float first
+                    target_cell.value = float(new_value)
+                except ValueError:
+                    # if above doesn't work, save as string
+                    target_cell.value = new_value
+                return True  # Return after the first match to avoid unnecessary updates
+    return False  # Return False if parameter not found
+
+def update_natural_hazard_parameters(nat_disaster_year, recovery_period, tradable_impact,
+                                    nontradable_impact, reconstruction_efficiency, public_debt_premium,
+                                    public_impact, private_impact, share_tradable):
+    '''
+    This function returns a dictionary that will be used to populate the Disasters sheet in DIGNAD.
+    It takes as input the 9 parameters the user typically has to set in the Disasters sheet.
+    '''
+
+    excel_updates = {
+    (3, 4): nat_disaster_year - 2021, # C4 cell update
+    (4, 4): nat_disaster_year, # D4 cell update
+    (4, 7): tradable_impact, # D7 cell update
+    (4, 8): nontradable_impact, # D8 cell update
+    (4, 9): reconstruction_efficiency, # D9 cell update
+    (4, 10): public_debt_premium, # D10 cell update
+    (4, 11): public_impact, # D11 cell update
+    (4, 12): private_impact, # D12 cell update
+    (4, 13): share_tradable, # D13 cell update
+    (3, 17): nat_disaster_year, # C17 cell update
+    (4, 17): nat_disaster_year, # D17 cell update
+    (3, 18): nat_disaster_year + recovery_period, # C18 cell update
+    (4, 18): nat_disaster_year + recovery_period, # D18 cell update
+    (3, 20): nat_disaster_year, # C20 cell update
+    (3, 21): nat_disaster_year + recovery_period, # C21 cell update
+    (3, 23): nat_disaster_year, # C23 cell update
+    (3, 24): nat_disaster_year + recovery_period, # C24 cell update
+    (3, 26): nat_disaster_year, # C26 cell update
+    (3, 27): nat_disaster_year + recovery_period # C27 cell update
+    }
+
+    return excel_updates
+
+def run_DIGNAD(calibration_csv, nat_disaster_year, recovery_period, tradable_impact, nontradable_impact,
+                reconstruction_efficiency, public_debt_premium, public_impact, private_impact, share_tradable):
+    '''
+    This function runs on instance of DIGNAD with a prespecified calibration csv.
+    Parameters passed to the function are the natural hazard parameters.
+    Function outputs a list of GDP losses - from 2021 - 2040
+    Need to set filepaths for own DIGNAD installation.
+    '''
+
+    ### 1. Load the original Excel file - this is where all DIGNAD parameters are set
+    excel_file = r"D:\projects\sovereign-risk\Thailand\DIGNAD\DIGNAD_Toolkit_2023\PW_SHARED_2023\DIGNAD_Toolkit\DIGNAD_python\input_DIG-ND.xlsx"
+    wb = load_workbook(excel_file)
+
+    ### 2. Load the CSV with calibration parameters
+    calibration_df = pd.read_csv(calibration_csv)
+
+    ### 3. Set calibration parameters
+    sheet = wb['Calibration']
+    # Iterate over the calibration DataFrame rows
+    for index, row in calibration_df.iterrows():
+        parameter = row['Parameters']  # The column name in your CSV for the parameter names
+        new_value = row['Values']       # The column name in your CSV for the new values
+        updated = update_calibration_parameters(sheet, parameter, new_value)
+        if not updated:
+            print(f"Parameter '{parameter}' not found in the Excel sheet.")
+
+    ### 4. Update disasters sheet
+    natdisaster_params = update_natural_hazard_parameters(nat_disaster_year, recovery_period, tradable_impact,
+                                                                nontradable_impact, reconstruction_efficiency,
+                                                                public_debt_premium, public_impact, private_impact, share_tradable)
+    sheet = wb['Disasters']
+    for (col, row), value in natdisaster_params.items():
+        cell = sheet.cell(row=row, column=col)
+        cell.value = value
+
+    ### 5. Save Excel Workbook
+    wb.save(excel_file)
+
+    ### 6. Run Matlab
+    matlab_script = r"D:\projects\sovereign-risk\Thailand\DIGNAD\DIGNAD_Toolkit_2023\PW_SHARED_2023\DIGNAD_Toolkit\DIGNAD_python\simulate.m"
+    result = subprocess.call(["matlab", "-batch", "run('" + matlab_script + "')"])
+    if int(result) != 0:
+        print("MATLAB script not executed succesfully")
+        return None, None
+
+    ### 7. Read results from Excel sheet
+    # Get today's date as that is the name of file and directory
+    today = datetime.datetime.today().strftime("%d%b%Y")
+    file_path = r"D:\projects\sovereign-risk\Thailand\DIGNAD\DIGNAD_Toolkit_2023\PW_SHARED_2023\DIGNAD_Toolkit\DIGNAD_python\Excel output\%s\Model_output_%s.xlsx" % (today, today)
+    df = pd.read_excel(file_path)
+    years = list(df.iloc[:, 0])
+    gdp_impact = list(df.iloc[:, 1])
+
+    return gdp_impact, years
+    
