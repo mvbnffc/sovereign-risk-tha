@@ -954,6 +954,157 @@ def sectoral_monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_va
 
     return res_df, com_df, ind_df, inf_df
 
+def sectoral_urban_monte_carlo_dependence_simulation(loss_df, rps, basin_col, epoch_val, scenario_val, protection_level, num_years, ordered_basins, copula_models, num_simulations=10000):
+    '''
+    Adjusted to account for urban protection
+    Perform Monte Carlo simulations of yearly losses incorporating basin dependencies. This function is specifically for simulating urban flood protection
+
+    :param loss_df: dataframe with losses from risk analysis
+    :param rps: list of return periods to consider. 
+    :param basin_col: name of column for basins (e.g. 'HB_L6')
+    :param epoch_val: name of epoch value (e.g. 'Today')
+    :param scenario_val: name of scenario (e.g. 'Baseline')
+    :param protection_level: what is the baseline protection level (e.g. 0.5 or 1 in 2 years)
+    :param num_years: Number of years to simulate
+    :param ordered_basins: List of basin IDs ordered by dependency
+    :param copula_models: Dictionary holding copula model for each basin pair
+    :param num__simulations: Number of simulations (default is 10,000).
+    :return: Dataframe of simulated national losses for each year.
+    '''
+
+    # To speed up the Monte-Carlo simulation we are going to pre-compute some variables
+    # precompute loss-probability curves for each basin
+
+    urban_res_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, 'Residential', rps) for basin_id in ordered_basins}
+    urban_com_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, 'Commercial', rps) for basin_id in ordered_basins}
+    urban_ind_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, 'Industrial', rps) for basin_id in ordered_basins}
+    urban_inf_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, scenario_val, 'Infrastructure', rps) for basin_id in ordered_basins}
+
+    res_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, 'Baseline', "Residential", rps) for basin_id in ordered_basins}
+    com_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, 'Baseline', "Commercial", rps) for basin_id in ordered_basins}
+    ind_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, 'Baseline', "Industrial", rps) for basin_id in ordered_basins}
+    inf_basin_loss_curves = {basin_id: basin_loss_curve(loss_df, basin_id, basin_col, epoch_val, 'Baseline', "Infrastructure", rps) for basin_id in ordered_basins}
+
+    # Initialize array for national losses
+    res_national_losses_per_year = np.zeros((num_simulations, num_years))
+    com_national_losses_per_year = np.zeros((num_simulations, num_years))
+    ind_national_losses_per_year = np.zeros((num_simulations, num_years))
+    inf_national_losses_per_year = np.zeros((num_simulations, num_years))
+    # Generate all random numbers in advance
+    random_numbers = np.random.uniform(0, 1, (num_simulations, num_years, len(ordered_basins))).astype(np.float32)
+
+    for simulation in range(num_simulations):
+        # # print progress
+        # if simulation % 50 == 0:
+        #     print('Simulation progress: %s out of %s' % (simulation, num_simulations))
+        for year in range(num_years):
+            # Initialize a list to store losses for each basin for the current year
+            yearly_losses = []
+            res_yearly_loss_values = []
+            com_yearly_loss_values = []
+            ind_yearly_loss_values = []
+            inf_yearly_loss_values = []
+            for i, basin_id in enumerate(ordered_basins):
+                if i == 0:
+                    # Handle first basin
+                    r = random_numbers[simulation, year, i]
+                    urban_res_loss_curves = urban_res_basin_loss_curves[basin_id]
+                    urban_com_loss_curves = urban_com_basin_loss_curves[basin_id]
+                    urban_ind_loss_curves = urban_ind_basin_loss_curves[basin_id]
+                    urban_inf_loss_curves = urban_inf_basin_loss_curves[basin_id]
+                    res_loss_curves = res_basin_loss_curves[basin_id]
+                    com_loss_curves = com_basin_loss_curves[basin_id]
+                    ind_loss_curves = ind_basin_loss_curves[basin_id]
+                    inf_loss_curves = inf_basin_loss_curves[basin_id]
+                    yearly_losses.append(r) # add current loss simulation to the list
+                    if r < 0.01: # use baseline maps if AEP < 0.01
+                        for Pr_L in urban_res_loss_curves:
+                            res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], r, protection_level))
+                            com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], r, protection_level))
+                            ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], r, protection_level))
+                            inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], r, protection_level))
+                    else:
+                        for Pr_L in urban_res_loss_curves:
+                            if Pr_L <= r:
+                                continue
+                            else:
+                                res_yearly_loss_values.append(interpolate_damages(rps, urban_res_loss_curves[Pr_L], r, protection_level))
+                                com_yearly_loss_values.append(interpolate_damages(rps, urban_com_loss_curves[Pr_L], r, protection_level))
+                                ind_yearly_loss_values.append(interpolate_damages(rps, urban_ind_loss_curves[Pr_L], r, protection_level))
+                                inf_yearly_loss_values.append(interpolate_damages(rps, urban_inf_loss_curves[Pr_L], r, protection_level))
+                            
+                else:
+                    urban_res_loss_curves = urban_res_basin_loss_curves[basin_id]
+                    urban_com_loss_curves = urban_com_basin_loss_curves[basin_id]
+                    urban_ind_loss_curves = urban_ind_basin_loss_curves[basin_id]
+                    urban_inf_loss_curves = urban_inf_basin_loss_curves[basin_id]
+                    res_loss_curves = res_basin_loss_curves[basin_id]
+                    com_loss_curves = com_basin_loss_curves[basin_id]
+                    ind_loss_curves = ind_basin_loss_curves[basin_id]
+                    inf_loss_curves = inf_basin_loss_curves[basin_id]
+                    # Handle subsequent basins with dependencies
+                    copula = get_copula_model(copula_models, ordered_basins[i-1], basin_id)
+                    if copula is not None:
+                        # Apply dependency model if theta exists
+                        r = random_numbers[simulation, year, i]
+                        previous_loss = yearly_losses[i-1]
+                        current_loss = generate_conditional_sample(previous_loss, copula.theta, r)
+                        yearly_losses.append(current_loss)
+                        # TODO: need to check below assumption. Currently, the (1-current_loss) criteria leads to stupid results.
+                        # in the below interpolation the (1-current_loss) part of the equation is critical.
+                        # because the copula is optimized to model tail dependencies (e.g. > 0.9) and our AEPs are 
+                        # essentially inverted (e.g. 0.001 is extreme) we need to invert the random number for interpolating the
+                        # losses. This changes nothing apart from ensuring tail dependency is preserved. 
+                        if current_loss < 0.01: # Use baseline maps
+                            for Pr_L in res_loss_curves: 
+                                res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], current_loss, protection_level))
+                                com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], current_loss, protection_level))
+                                ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], current_loss, protection_level))
+                                inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], current_loss, protection_level))
+                        else:
+                            for Pr_L in urban_res_loss_curves:
+                                if Pr_L <= current_loss:
+                                    continue
+                                else:
+                                    res_yearly_loss_values.append(interpolate_damages(rps, urban_res_loss_curves[Pr_L], current_loss, protection_level))
+                                    com_yearly_loss_values.append(interpolate_damages(rps, urban_com_loss_curves[Pr_L], current_loss, protection_level))                    
+                                    ind_yearly_loss_values.append(interpolate_damages(rps, urban_ind_loss_curves[Pr_L], current_loss, protection_level))                    
+                                    inf_yearly_loss_values.append(interpolate_damages(rps, urban_inf_loss_curves[Pr_L], current_loss, protection_level))                    
+                    else:
+                        # Independent simulation for this basin
+                        r = random_numbers[simulation, year, i]
+                        yearly_losses.append(r)
+                        if r < 0.01: # use baseline maps if AEP < 0.01
+                            for Pr_L in res_loss_curves:
+                                res_yearly_loss_values.append(interpolate_damages(rps, res_loss_curves[Pr_L], r, protection_level))
+                                com_yearly_loss_values.append(interpolate_damages(rps, com_loss_curves[Pr_L], r, protection_level))
+                                ind_yearly_loss_values.append(interpolate_damages(rps, ind_loss_curves[Pr_L], r, protection_level))
+                                inf_yearly_loss_values.append(interpolate_damages(rps, inf_loss_curves[Pr_L], r, protection_level))
+                        else:
+                            for Pr_L in urban_res_loss_curves:
+                                if Pr_L <= r:
+                                    continue
+                                else:
+                                    res_yearly_loss_values.append(interpolate_damages(rps, urban_res_loss_curves[Pr_L], r, protection_level))
+                                    com_yearly_loss_values.append(interpolate_damages(rps, urban_com_loss_curves[Pr_L], r, protection_level))
+                                    ind_yearly_loss_values.append(interpolate_damages(rps, urban_ind_loss_curves[Pr_L], r, protection_level))
+                                    inf_yearly_loss_values.append(interpolate_damages(rps, urban_inf_loss_curves[Pr_L], r, protection_level))
+
+           # Aggregate losses for the current year
+            res_national_losses_per_year[simulation, year] = sum(res_yearly_loss_values)
+            com_national_losses_per_year[simulation, year] = sum(com_yearly_loss_values)
+            ind_national_losses_per_year[simulation, year] = sum(ind_yearly_loss_values)
+            inf_national_losses_per_year[simulation, year] = sum(inf_yearly_loss_values)
+
+    # Convert the results into a DataFrame
+    res_df = pd.DataFrame(res_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    com_df = pd.DataFrame(com_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    ind_df = pd.DataFrame(ind_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+    inf_df = pd.DataFrame(inf_national_losses_per_year, columns=[f'Year_{i+1}' for i in range(num_years)])
+
+    return res_df, com_df, ind_df, inf_df
+
+
 # Necessary functions
 def update_calibration_parameters(sheet, parameter, new_value):
     '''
@@ -1060,4 +1211,60 @@ def run_DIGNAD(calibration_csv, nat_disaster_year, recovery_period, tradable_imp
     gdp_impact = list(df.iloc[:, 1])
 
     return gdp_impact, years
+
+def dignad_loss_probability(res_df, com_df, ind_df, inf_df, res_share_pri, res_share_tra, com_share_pri, com_share_tra, ind_share_pri, ind_share_tra, inf_share_pri, inf_share_tra, tradable_cap_stock, nontradable_cap_stock, GDP):
+    '''
+    Function for converting loss probability curves to DIGNAD compliant loss-pobability curves.
+    Also creates a total capital stock loss-probability curve.
+    Inputs needed include sectoral loss dataframes, sectoral share for private and tradable capital stock, capital stock (tradable and nontradable) and GDP.
+    Outputs 7 flattened and sorted arrays
+    '''
+    # Flatten arrays
+    res_losses = res_df.values.flatten()
+    com_losses = com_df.values.flatten()
+    ind_losses = ind_df.values.flatten()
+    inf_losses = inf_df.values.flatten()
+    total_losses = res_losses + com_losses + ind_losses + inf_losses
+
+    # Calculate share of private, public, tradable and non-tradable losses (for DIGNAD)
+    tradable_perc_impact = ((res_losses * res_share_tra) + (com_losses * com_share_tra) + (ind_losses * ind_share_tra) +
+                            (inf_losses * inf_share_tra))/tradable_cap_stock
+    nontradable_perc_impact = ((res_losses * (1-res_share_tra)) + (com_losses * (1-com_share_tra)) + (ind_losses * (1-ind_share_tra)) +
+                            (inf_losses * (1-inf_share_tra)))/nontradable_cap_stock
+    private_perc_impact = ((res_losses * res_share_pri) + (com_losses * com_share_pri) + (ind_losses * ind_share_pri) +
+                            (inf_losses * inf_share_pri))/GDP
+    public_perc_impact = ((res_losses * (1-res_share_pri)) + (com_losses * (1-com_share_pri)) + (ind_losses * (1-ind_share_pri)) +
+                            (inf_losses * (1-inf_share_pri)))/GDP
+    share_tradable = ((res_losses * res_share_tra) + (com_losses * com_share_tra) + (ind_losses * ind_share_tra) + (inf_losses * inf_share_tra)) / ((res_losses * res_share_pri) + (com_losses * com_share_pri) + (ind_losses * ind_share_pri) + (inf_losses * inf_share_pri))
+
+    # Sort the layers based on total losses
+    sorted_indices = np.argsort(total_losses)
+    sorted_losses = total_losses[sorted_indices]
+    sorted_tradable = tradable_perc_impact[sorted_indices]
+    sorted_nontradable = nontradable_perc_impact[sorted_indices]
+    sorted_public = public_perc_impact[sorted_indices]
+    sorted_private = private_perc_impact[sorted_indices]
+    sorted_share_tradable = share_tradable[sorted_indices]
+
+    return sorted_losses, sorted_tradable, sorted_nontradable, sorted_public, sorted_private, sorted_share_tradable
+
+def get_loss_for_rp(return_period, sorted_losses, exceedance_probs):
+    ep = 1 / return_period
+    if ep >= exceedance_probs[0]:
+        return sorted_losses[0]
+    elif ep <= exceedance_probs[-1]:
+        return sorted_losses[-1]
+    else:
+        return np.interp(ep, exceedance_probs[::-1], sorted_losses[::-1])
+
+def get_dignad_inputs_for_rp(return_period, exceedance_probabilities, sorted_tradable, sorted_nontradable, sorted_public, sorted_private, sorted_share_tradable):
+    '''
+    Function for extracting DIGNAD data for a specific return period
+    '''
+    tradable_impact = get_loss_for_rp(return_period, sorted_tradable, exceedance_probabilities)
+    nontradable_impact = get_loss_for_rp(return_period, sorted_nontradable, exceedance_probabilities)
+    public_impact = get_loss_for_rp(return_period, sorted_public, exceedance_probabilities)
+    private_impact = get_loss_for_rp(return_period, sorted_private, exceedance_probabilities)
+    share_tradable = get_loss_for_rp(return_period, sorted_share_tradable, exceedance_probabilities)
+    return tradable_impact, nontradable_impact, public_impact, private_impact, share_tradable
     
