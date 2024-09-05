@@ -19,7 +19,8 @@ protection_levels = map_flopros_to_adm(mapping_csv, flopros_database, adm_data)
 print('Calculate river length within each basin')
 river_data = gpd.read_file(os.path.join(data_dir, "flood/river/hydroRIVERS_v10_THA.shp"))
 urbanisation_data = gpd.read_file(os.path.join(data_dir, "flood/adaptation/ghsl_du/ghsl_du_gadm_THA.gpkg"))
-flopros_rivers = calculate_river_length_per_admin(protection_levels, river_data, 500, urbanisation_data, 21) # 21 is peri-urban areas or denser. See GHSL report for details
+urbanisation_level = 11
+flopros_rivers = calculate_river_length_per_admin(protection_levels, river_data, 500, urbanisation_data, urbanisation_level) # 21 is peri-urban areas or denser. See GHSL report for details
 
 # Calculate how much additional protection is needed to reach a target protection level (e.g. 100)
 print('Calculate how much additional protection is needed')
@@ -30,35 +31,35 @@ print('Calculate cost of additional protection')
 flopros = calculate_increased_protection_costs(flopros, 2399000) # $2.399 million per km unit cost from Boulange paper
 
 # Write to final file
-flopros.to_file(os.path.join(data_dir, 'flood/adaptation/flopros/final_admin_flopros.gpkg'))
+flopros.to_file(os.path.join(data_dir, 'flood/adaptation/flopros/final_admin_flopros_%s.gpkg' % urbanisation_level))
 
-##### ADDITIONAL STEP FOR FUTURE RISK ANALYSIS Create a raster mask for the urban population protected by the flood infrastructure
-ref_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\maps\THA_global_pc_h100glob.tif" # use a flood map as a reference for creating the mask rasters
-out_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\adaptation\flopros\urban_mask.tif"
-filtered_urbanisation = urbanisation_data[urbanisation_data['L2'] >= 21] # Same threshold as above
+# ##### ADDITIONAL STEP FOR FUTURE RISK ANALYSIS Create a raster mask for the urban population protected by the flood infrastructure
+# ref_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\maps\THA_global_pc_h100glob.tif" # use a flood map as a reference for creating the mask rasters
+# out_raster = r"D:\projects\sovereign-risk\Thailand\data\flood\adaptation\flopros\urban_mask_%s.tif" % urbanisation_level
+# filtered_urbanisation = urbanisation_data[urbanisation_data['L2'] >= urbanisation_level] # Same threshold as above
 
-# Open the reference raster to use its dimensions and CRS
-with rasterio.open(ref_raster) as ref:
-    # Create an empty mask with the same dimensions as the reference raster
-    mask = rasterio.features.rasterize(
-        ((geom, 1) for geom in filtered_urbanisation.geometry),
-        out_shape=ref.shape,
-        transform=ref.transform,
-        fill=0,  # Fill value for 'background'
-        all_touched=False,  # Only if centroids touch. 
-        dtype='uint8'
-    )
+# # Open the reference raster to use its dimensions and CRS
+# with rasterio.open(ref_raster) as ref:
+#     # Create an empty mask with the same dimensions as the reference raster
+#     mask = rasterio.features.rasterize(
+#         ((geom, 1) for geom in filtered_urbanisation.geometry),
+#         out_shape=ref.shape,
+#         transform=ref.transform,
+#         fill=0,  # Fill value for 'background'
+#         all_touched=False,  # Only if centroids touch. 
+#         dtype='uint8'
+#     )
 
-# Save the mask raster
-with rasterio.open(
-    out_raster,
-    'w',
-    driver='GTiff',
-    height=ref.height,
-    width=ref.width,
-    count=1,
-    dtype='uint8',
-    crs=ref.crs,
-    transform=ref.transform,
-) as dst:
-    dst.write(mask, 1)
+# # Save the mask raster
+# with rasterio.open(
+#     out_raster,
+#     'w',
+#     driver='GTiff',
+#     height=ref.height,
+#     width=ref.width,
+#     count=1,
+#     dtype='uint8',
+#     crs=ref.crs,
+#     transform=ref.transform,
+# ) as dst:
+#     dst.write(mask, 1)

@@ -3,12 +3,12 @@
 import geopandas as gpd
 from rasterstats import zonal_stats
 import pandas as pd
-from D_analysis_info import zonal_sum_rasters_info_exposure
+from D_analysis_info import zonal_sum_rasters_info_urban
 
 # Set basin path
 basin_path = r"D:\projects\sovereign-risk\Thailand\data\flood\basins\analysis_basins.gpkg"
 # Set output path
-output_path = r"D:\projects\sovereign-risk\Thailand\analysis\flood\risk_analysis\dignad\exposure\risk_basin_zonal_sum.csv"
+output_path = r"D:\projects\sovereign-risk\Thailand\analysis\flood\risk_analysis\dignad\urban\risk_basin_zonal_sum.csv"
 
 # Load basins
 basin_df = gpd.read_file(basin_path)
@@ -18,17 +18,13 @@ results_df = pd.DataFrame()
 
 i = 0
 # Loop through all rasters. Calculating zonal sum for each
-for raster_info in zonal_sum_rasters_info_exposure:
+for raster_info in zonal_sum_rasters_info_urban:
     # Print Progress
 
-    print('Layer #', i)
-    print(raster_info)
-
-
-    # if i % 20 == 0:
-    #     print('Layer #', i)
-    #     print(raster_info)
-    # i += 1
+    if i % 20 == 0:
+        print('Layer #', i)
+        print(raster_info)
+    i += 1
     
     # Calculate zonal statistics for each raster
     zs = zonal_stats(basin_df, raster_info['file'], stats="sum", geojson_out=True)
